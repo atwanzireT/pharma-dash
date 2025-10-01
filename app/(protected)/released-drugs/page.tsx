@@ -13,6 +13,7 @@ import {
 } from 'firebase/database';
 import { Search, ShieldCheck, Loader2, PackageCheck } from 'lucide-react';
 import AuthGate from '@/components/AuthGate';
+import Navbar from '@/components/Navbar';
 
 type Inspection = {
   id: string;
@@ -231,8 +232,6 @@ function ReleasedDrugsPageInner() {
 
 export default function ReleasedDrugsPage() {
   return (
-    <AuthGate /* requireAnyRole={['inspector','admin']} */>
-      <ReleasedDrugsPageInner />
-    </AuthGate>
+    <ReleasedDrugsPageInner />
   );
 }

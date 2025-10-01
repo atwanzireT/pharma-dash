@@ -12,10 +12,7 @@ import {
   Shield,
   AlertCircle,
   CheckCircle2,
-  Store
 } from 'lucide-react';
-import { Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { auth } from '@/firebase';
 import {
   setPersistence,
@@ -24,17 +21,14 @@ import {
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   onAuthStateChanged,
-  AuthError
 } from 'firebase/auth';
+import type { FirebaseError } from 'firebase/app';
 
-// Type for form errors
 interface FormErrors {
   email?: string;
   password?: string;
   general?: string;
 }
-
-// Type for form state
 interface FormState {
   email: string;
   password: string;
@@ -64,12 +58,18 @@ export default function LoginPage() {
     setMounted(true);
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
-        const redirectTo = searchParams.get('next') || searchParams.get('redirect') || '/dashboard';
+        const redirectTo =
+          searchParams.get('next') ||
+          searchParams.get('redirect') ||
+          '/dashboard';
+        // Avoid redirect loop if already on the target:
         router.replace(redirectTo);
       }
     });
     return () => unsubscribe();
-  }, [router, searchParams]);
+    // searchParams is stable for this page instance; router is stable as well.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Clear errors when user starts typing
   useEffect(() => {
@@ -84,21 +84,17 @@ export default function LoginPage() {
     }
   }, [formState.email, formState.password, errors]);
 
-  // Form validation
   const validateForm = useCallback((): boolean => {
     const newErrors: FormErrors = {};
+    const email = formState.email.trim();
 
-    // Email validation
-    if (!formState.email.trim()) {
-      newErrors.email = 'Email is required';
-    } else if (!/^\S+@\S+\.\S+$/.test(formState.email.trim())) {
+    if (!email) newErrors.email = 'Email is required';
+    else if (!/^\S+@\S+\.\S+$/.test(email)) {
       newErrors.email = 'Please enter a valid email address';
     }
 
-    // Password validation
-    if (!formState.password) {
-      newErrors.password = 'Password is required';
-    } else if (formState.password.length < 6) {
+    if (!formState.password) newErrors.password = 'Password is required';
+    else if (formState.password.length < 6) {
       newErrors.password = 'Password must be at least 6 characters';
     }
 
@@ -106,44 +102,39 @@ export default function LoginPage() {
     return Object.keys(newErrors).length === 0;
   }, [formState.email, formState.password]);
 
+  // Don’t depend on `errors` here; rely on validation + local checks
   const canSubmit = useMemo(() => {
-    return formState.email.trim().length > 0 && 
-           formState.password.length >= 6 && 
-           !formState.isSubmitting &&
-           Object.keys(errors).length === 0;
-  }, [formState.email, formState.password, formState.isSubmitting, errors]);
+    return (
+      formState.email.trim().length > 0 &&
+      formState.password.length >= 6 &&
+      !formState.isSubmitting
+    );
+  }, [formState.email, formState.password, formState.isSubmitting]);
 
-  // Handle form submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!validateForm()) {
-      return;
-    }
+    if (!validateForm()) return;
 
     setFormState(prev => ({ ...prev, isSubmitting: true, successMessage: null }));
     setErrors({});
 
     try {
-      // Set persistence based on remember me choice
       await setPersistence(
-        auth, 
+        auth,
         formState.rememberMe ? browserLocalPersistence : browserSessionPersistence
       );
 
-      // Sign in user
       await signInWithEmailAndPassword(
-        auth, 
-        formState.email.trim(), 
+        auth,
+        formState.email.trim(),
         formState.password
       );
-      
-      // onAuthStateChanged will handle redirect
-    } catch (error: unknown) {
-      const authError = error as AuthError;
+      // Redirect handled by onAuthStateChanged
+    } catch (err: unknown) {
+      const fe = err as FirebaseError;
       let errorMessage = 'Failed to sign in. Please try again.';
 
-      switch (authError.code) {
+      switch (fe.code) {
         case 'auth/user-not-found':
           errorMessage = 'No account found with this email address.';
           break;
@@ -157,28 +148,25 @@ export default function LoginPage() {
           errorMessage = 'Invalid email or password.';
           break;
         case 'auth/too-many-requests':
-          errorMessage = 'Too many failed attempts. Please try again later or reset your password.';
+          errorMessage = 'Too many failed attempts. Try again later or reset your password.';
           break;
         case 'auth/user-disabled':
           errorMessage = 'This account has been disabled. Please contact support.';
           break;
         case 'auth/network-request-failed':
-          errorMessage = 'Network error. Please check your connection and try again.';
+          errorMessage = 'Network error. Check your connection and try again.';
           break;
         default:
-          errorMessage = authError.message || 'An unexpected error occurred.';
+          errorMessage = fe.message || errorMessage;
       }
-
       setErrors({ general: errorMessage });
     } finally {
       setFormState(prev => ({ ...prev, isSubmitting: false }));
     }
   };
 
-  // Handle password reset
   const handleForgotPassword = async () => {
     const email = formState.email.trim();
-    
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
       setErrors({ general: 'Please enter your email address first.' });
       return;
@@ -189,23 +177,23 @@ export default function LoginPage() {
 
     try {
       await sendPasswordResetEmail(auth, email);
-      setFormState(prev => ({ 
-        ...prev, 
-        successMessage: `Password reset link sent to ${email}. Check your inbox.` 
+      setFormState(prev => ({
+        ...prev,
+        successMessage: `Password reset link sent to ${email}. Check your inbox.`
       }));
-    } catch (error: unknown) {
-      const authError = error as AuthError;
-      setErrors({ 
-        general: authError.code === 'auth/user-not-found' 
-          ? 'No account found with this email address.'
-          : 'Failed to send reset email. Please try again.'
+    } catch (err: unknown) {
+      const fe = err as FirebaseError;
+      setErrors({
+        general:
+          fe.code === 'auth/user-not-found'
+            ? 'No account found with this email address.'
+            : 'Failed to send reset email. Please try again.'
       });
     } finally {
       setFormState(prev => ({ ...prev, isSubmitting: false }));
     }
   };
 
-  // Update form state helper
   const updateFormState = (updates: Partial<FormState>) => {
     setFormState(prev => ({ ...prev, ...updates }));
   };
@@ -241,7 +229,7 @@ export default function LoginPage() {
           onSubmit={handleSubmit}
           className="space-y-6 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm p-8 shadow-xl"
         >
-          {/* Email Field */}
+          {/* Email */}
           <div>
             <label htmlFor="email" className="block text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
               Email Address
@@ -262,6 +250,7 @@ export default function LoginPage() {
                 required
                 autoComplete="email"
                 disabled={formState.isSubmitting}
+                inputMode="email"
               />
             </div>
             {errors.email && (
@@ -272,7 +261,7 @@ export default function LoginPage() {
             )}
           </div>
 
-          {/* Password Field */}
+          {/* Password */}
           <div>
             <label htmlFor="password" className="block text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
               Password
@@ -351,7 +340,7 @@ export default function LoginPage() {
             </button>
           </div>
 
-          {/* Error Message */}
+          {/* Error */}
           {errors.general && (
             <div className="rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4">
               <p className="text-sm text-rose-700 dark:text-rose-300 flex items-center gap-2">
@@ -361,7 +350,7 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Success Message */}
+          {/* Success */}
           {formState.successMessage && (
             <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 p-4">
               <p className="text-sm text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
@@ -371,7 +360,7 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Submit Button */}
+          {/* Submit */}
           <button
             type="submit"
             disabled={!canSubmit}

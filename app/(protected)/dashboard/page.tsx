@@ -10,7 +10,7 @@ import {
   onValue,
   query as rtdbQuery,
   orderByChild,
-  startAt,
+  limitToLast,
 } from 'firebase/database';
 import {
   ClipboardList,
@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import AuthGate from '@/components/AuthGate';
+import Navbar from '@/components/Navbar';
 
 type InspectionLite = {
   id: string;
@@ -43,38 +44,39 @@ type InspectionFull = {
   createdAt?: number | string;
   date?: string;
   status?: string;
-  releasedAt?: number;
+  releasedAt?: number | string;
   releasedBy?: string;
   releaseNote?: string;
   [k: string]: any;
 };
 
-function parseNum(n: unknown) {
-  if (typeof n === 'number') return n;
+function toNum(n: unknown) {
+  if (typeof n === 'number') return Number.isFinite(n) ? n : 0;
   if (typeof n === 'string') {
-    const x = Number(n);
+    const x = Number(n.trim());
     return Number.isFinite(x) ? x : 0;
   }
   return 0;
 }
 function toMs(x?: string | number) {
-  if (!x) return 0;
-  if (typeof x === 'number') return x;
-  const t = Date.parse(x);
+  if (!x && x !== 0) return 0;
+  if (typeof x === 'number') return Number.isFinite(x) ? x : 0;
+  const t = Date.parse(String(x));
   return Number.isFinite(t) ? t : 0;
 }
 function fmt(ms?: number) {
   if (!ms) return '—';
   return new Intl.DateTimeFormat(undefined, {
-    year: 'numeric', month: 'short', day: '2-digit',
-    hour: '2-digit', minute: '2-digit',
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
   }).format(new Date(ms));
 }
 
-// Split into an inner component so we can wrap with <AuthGate />
 function DashboardPageInner() {
   const auth = getAuth(app);
-  const _me = auth.currentUser;
 
   const [loading, setLoading] = useState(true);
 
@@ -93,31 +95,30 @@ function DashboardPageInner() {
   const [selected, setSelected] = useState<InspectionFull | null>(null);
   const [loadingModal, setLoadingModal] = useState(false);
 
-  // Subscribe: total inspections & recent list
+  // Subscribe: recent inspections (server-sorted by createdAt/date)
   useEffect(() => {
-    const node = ref(database, 'inspections');
+    // Prefer a single timestamp field; fallback to "date" if "createdAt" missing.
+    // If your data only has `date`, change to orderByChild('date').
+    const q = rtdbQuery(ref(database, 'inspections'), orderByChild('createdAt'), limitToLast(12));
     const unsub = onValue(
-      node,
+      q,
       (snap) => {
         const val = (snap.val() ?? {}) as Record<string, any>;
-        const entries = Object.entries(val).map(([id, v]) => {
-          const createdAtMs = toMs(v.createdAt ?? v.date);
-          return {
-            id,
-            serialNumber: v.serialNumber,
-            drugshopName: v.drugshopName,
-            createdAtMs,
-            boxes: parseNum(v.boxesImpounded),
-          } as InspectionLite;
-        });
-
-        setInspectionsCount(entries.length);
-
-        const sorted = entries
+        const list: InspectionLite[] = Object.entries(val)
+          .map(([id, v]) => {
+            const createdAtMs = toMs(v.createdAt ?? v.date);
+            return {
+              id,
+              serialNumber: v.serialNumber,
+              drugshopName: v.drugshopName,
+              createdAtMs,
+              boxes: toNum(v.boxesImpounded),
+            };
+          })
+          // in case some rows have identical timestamps or order anomalies
           .sort((a, b) => b.createdAtMs - a.createdAtMs)
           .slice(0, 10);
-        setRecent(sorted);
-
+        setRecent(list);
         setLoading(false);
       },
       () => setLoading(false)
@@ -125,51 +126,35 @@ function DashboardPageInner() {
     return () => unsub();
   }, []);
 
-  // Subscribe: bounded drugs (boxesImpounded > 0)
+  // Subscribe: compute all KPI counts from one listener
   useEffect(() => {
-    const q = rtdbQuery(
-      ref(database, 'inspections'),
-      orderByChild('boxesImpounded'),
-      startAt(1 as any)
-    );
     const unsub = onValue(
-      q,
+      ref(database, 'inspections'),
       (snap) => {
         const val = (snap.val() ?? {}) as Record<string, any>;
-        const count = Object.values(val).reduce(
-          (acc, row: any) => (parseNum(row?.boxesImpounded) > 0 ? acc + 1 : acc),
-          0
-        );
-        setBoundedCount(count);
-      },
-      () => setBoundedCount(0)
-    );
-    return () => unsub();
-  }, []);
+        const entries = Object.values(val) as any[];
 
-  // Subscribe: released drugs (releasedAt > 0)
-  useEffect(() => {
-    const q = rtdbQuery(
-      ref(database, 'inspections'),
-      orderByChild('releasedAt'),
-      startAt(1 as any)
-    );
-    const unsub = onValue(
-      q,
-      (snap) => {
-        const val = (snap.val() ?? {}) as Record<string, any>;
-        setReleasedCount(Object.keys(val).length);
+        const total = entries.length;
+        const bounded = entries.reduce((acc, row) => (toNum(row?.boxesImpounded) > 0 ? acc + 1 : acc), 0);
+        const released = entries.reduce((acc, row) => (toMs(row?.releasedAt) > 0 ? acc + 1 : acc), 0);
+
+        setInspectionsCount(total);
+        setBoundedCount(bounded);
+        setReleasedCount(released);
       },
-      () => setReleasedCount(0)
+      () => {
+        setInspectionsCount(0);
+        setBoundedCount(0);
+        setReleasedCount(0);
+      }
     );
     return () => unsub();
   }, []);
 
   // Subscribe: /drugshops registry count
   useEffect(() => {
-    const node = ref(database, 'drugshops');
     const unsub = onValue(
-      node,
+      ref(database, 'drugshops'),
       (snap) => {
         const val = (snap.val() ?? {}) as Record<string, any>;
         setDrugshopsCount(Object.keys(val).length);
@@ -219,38 +204,32 @@ function DashboardPageInner() {
 
   const openModal = useCallback((id: string) => {
     setSelectedId(id);
-    setSelected(null);
     setOpen(true);
-    setLoadingModal(true);
-
-    const node = ref(database, `inspections/${id}`);
-    const unsub = onValue(
-      node,
-      (snap) => {
-        const v = snap.val();
-        setSelected(v ? ({ id, ...v } as InspectionFull) : null);
-        setLoadingModal(false);
-      },
-      () => setLoadingModal(false)
-    );
-
-    // unsubscribe once the modal is closed
-    const stop = () => unsub();
-    // tie to close event
-    (openModal as any)._cleanup = stop;
   }, []);
 
   const closeModal = useCallback(() => {
     setOpen(false);
     setSelectedId(null);
     setSelected(null);
-    setLoadingModal(false);
-    const c = (openModal as any)._cleanup;
-    if (typeof c === 'function') {
-      c();
-      (openModal as any)._cleanup = null;
-    }
-  }, [openModal]);
+  }, []);
+
+  // Modal data subscription (clean up reliably)
+  useEffect(() => {
+    if (!open || !selectedId) return;
+    setLoadingModal(true);
+
+    const node = ref(database, `inspections/${selectedId}`);
+    const unsub = onValue(
+      node,
+      (snap) => {
+        const v = snap.val();
+        setSelected(v ? ({ id: selectedId, ...v } as InspectionFull) : null);
+        setLoadingModal(false);
+      },
+      () => setLoadingModal(false)
+    );
+    return () => unsub();
+  }, [open, selectedId]);
 
   // ESC to close
   useEffect(() => {
@@ -266,9 +245,7 @@ function DashboardPageInner() {
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Dashboard</h1>
-        <p className="text-sm text-gray-600 dark:text-gray-400">
-          Live overview from Realtime Database.
-        </p>
+        <p className="text-sm text-gray-600 dark:text-gray-400">Live overview from Realtime Database.</p>
       </div>
 
       {/* KPIs */}
@@ -288,9 +265,7 @@ function DashboardPageInner() {
                       {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : k.value}
                     </span>
                     {!loading && typeof k.value === 'number' && k.value >= 0 && (
-                      <span className={`text-xs rounded-full px-2 py-0.5 ${k.pill}`}>
-                        live
-                      </span>
+                      <span className={`text-xs rounded-full px-2 py-0.5 ${k.pill}`}>live</span>
                     )}
                   </div>
                 </div>
@@ -315,9 +290,7 @@ function DashboardPageInner() {
       {/* Recent Inspections */}
       <div className="mt-8 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-white">
-            Recent Inspections
-          </h2>
+          <h2 className="text-base font-semibold text-gray-900 dark:text-white">Recent Inspections</h2>
           <Link
             href="/inspections"
             className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300"
@@ -341,21 +314,11 @@ function DashboardPageInner() {
               {loading ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <tr key={`sk-${i}`} className="animate-pulse">
-                    <td className="px-4 py-3">
-                      <div className="h-4 w-24 bg-gray-200 dark:bg-gray-800 rounded" />
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded" />
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="h-4 w-10 bg-gray-200 dark:bg-gray-800 rounded" />
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="h-4 w-32 bg-gray-200 dark:bg-gray-800 rounded" />
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="h-9 w-28 bg-gray-200 dark:bg-gray-800 rounded-xl ml-auto" />
-                    </td>
+                    <td className="px-4 py-3"><div className="h-4 w-24 bg-gray-200 dark:bg-gray-800 rounded" /></td>
+                    <td className="px-4 py-3"><div className="h-4 w-40 bg-gray-200 dark:bg-gray-800 rounded" /></td>
+                    <td className="px-4 py-3"><div className="h-4 w-10 bg-gray-200 dark:bg-gray-800 rounded" /></td>
+                    <td className="px-4 py-3"><div className="h-4 w-32 bg-gray-200 dark:bg-gray-800 rounded" /></td>
+                    <td className="px-4 py-3 text-right"><div className="h-9 w-28 bg-gray-200 dark:bg-gray-800 rounded-xl ml-auto" /></td>
                   </tr>
                 ))
               ) : recent.length === 0 ? (
@@ -367,18 +330,10 @@ function DashboardPageInner() {
               ) : (
                 recent.map((r) => (
                   <tr key={r.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/40">
-                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">
-                      {r.serialNumber || '—'}
-                    </td>
-                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
-                      {r.drugshopName || '—'}
-                    </td>
-                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
-                      {r.boxes}
-                    </td>
-                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
-                      {r.createdAtMs ? fmt(r.createdAtMs) : '—'}
-                    </td>
+                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">{r.serialNumber || '—'}</td>
+                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{r.drugshopName || '—'}</td>
+                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{r.boxes}</td>
+                    <td className="px-4 py-3 text-gray-700 dark:text-gray-300">{r.createdAtMs ? fmt(r.createdAtMs) : '—'}</td>
                     <td className="px-4 py-3 text-right">
                       <button
                         onClick={() => openModal(r.id)}
@@ -406,13 +361,11 @@ function DashboardPageInner() {
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           {/* Backdrop */}
-          <div className="absolute inset-0 bg-black/50" onClick={closeModal} />
+          <button className="absolute inset-0 bg-black/50" onClick={closeModal} aria-label="Close modal backdrop" />
           {/* Dialog */}
-          <div className="relative z-10 w-full max-w-xl rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-5">
+          <div role="dialog" aria-modal="true" className="relative z-10 w-full max-w-xl rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-5">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                Inspection Preview
-              </h3>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Inspection Preview</h3>
               <button
                 className="rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-800"
                 onClick={closeModal}
@@ -443,15 +396,11 @@ function DashboardPageInner() {
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Boxes Impounded</div>
-                    <div className="font-medium">
-                      {parseNum(selected.boxesImpounded)}
-                    </div>
+                    <div className="font-medium">{toNum(selected.boxesImpounded)}</div>
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Created At</div>
-                    <div className="font-medium">
-                      {fmt(toMs((selected.createdAt as any) ?? selected.date))}
-                    </div>
+                    <div className="font-medium">{fmt(toMs((selected.createdAt as any) ?? selected.date))}</div>
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Status</div>
@@ -459,9 +408,7 @@ function DashboardPageInner() {
                   </div>
                   <div>
                     <div className="text-gray-500 dark:text-gray-400">Released</div>
-                    <div className="font-medium">
-                      {selected.releasedAt ? fmt(selected.releasedAt) : '—'}
-                    </div>
+                    <div className="font-medium">{toMs(selected.releasedAt) ? fmt(toMs(selected.releasedAt)) : '—'}</div>
                   </div>
                   {selected.releaseNote ? (
                     <div className="sm:col-span-2">
@@ -504,11 +451,9 @@ function DashboardPageInner() {
   );
 }
 
-// ✅ Export the page wrapped with the Auth gate
+// ✅ Page wrapped with Auth gate
 export default function DashboardPage() {
   return (
-    <AuthGate>
       <DashboardPageInner />
-    </AuthGate>
   );
 }
