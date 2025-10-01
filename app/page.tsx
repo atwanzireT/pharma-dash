@@ -1,3 +1,4 @@
+// app/page.tsx
 'use client';
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
@@ -11,11 +12,9 @@ import {
   Loader2, 
   Shield,
   AlertCircle,
-  CheckCircle2,
-  Store
+  CheckCircle2
 } from 'lucide-react';
 import { Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { auth } from '@/firebase';
 import {
   setPersistence,
@@ -27,14 +26,14 @@ import {
   AuthError
 } from 'firebase/auth';
 
-// Type for form errors
+export const dynamic = 'force-dynamic'; // opt out of SSG to avoid prerender error
+
+// Types
 interface FormErrors {
   email?: string;
   password?: string;
   general?: string;
 }
-
-// Type for form state
 interface FormState {
   email: string;
   password: string;
@@ -44,7 +43,8 @@ interface FormState {
   successMessage: string | null;
 }
 
-export default function LoginPage() {
+// ---- Inner component that actually uses useSearchParams ----
+function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -64,85 +64,78 @@ export default function LoginPage() {
     setMounted(true);
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
-        const redirectTo = searchParams.get('next') || searchParams.get('redirect') || '/dashboard';
+        const redirectTo =
+          searchParams.get('next') ||
+          searchParams.get('redirect') ||
+          '/dashboard';
         router.replace(redirectTo);
       }
     });
     return () => unsubscribe();
   }, [router, searchParams]);
 
-  // Clear errors when user starts typing
+  // Clear errors when typing
   useEffect(() => {
     if (errors.email && formState.email) {
-      setErrors(prev => ({ ...prev, email: undefined }));
+      setErrors((prev) => ({ ...prev, email: undefined }));
     }
     if (errors.password && formState.password) {
-      setErrors(prev => ({ ...prev, password: undefined }));
+      setErrors((prev) => ({ ...prev, password: undefined }));
     }
     if (errors.general && (formState.email || formState.password)) {
-      setErrors(prev => ({ ...prev, general: undefined }));
+      setErrors((prev) => ({ ...prev, general: undefined }));
     }
   }, [formState.email, formState.password, errors]);
 
-  // Form validation
+  // Validation
   const validateForm = useCallback((): boolean => {
     const newErrors: FormErrors = {};
-
-    // Email validation
     if (!formState.email.trim()) {
       newErrors.email = 'Email is required';
     } else if (!/^\S+@\S+\.\S+$/.test(formState.email.trim())) {
       newErrors.email = 'Please enter a valid email address';
     }
-
-    // Password validation
     if (!formState.password) {
       newErrors.password = 'Password is required';
     } else if (formState.password.length < 6) {
       newErrors.password = 'Password must be at least 6 characters';
     }
-
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   }, [formState.email, formState.password]);
 
   const canSubmit = useMemo(() => {
-    return formState.email.trim().length > 0 && 
-           formState.password.length >= 6 && 
-           !formState.isSubmitting &&
-           Object.keys(errors).length === 0;
+    return (
+      formState.email.trim().length > 0 &&
+      formState.password.length >= 6 &&
+      !formState.isSubmitting &&
+      Object.keys(errors).length === 0
+    );
   }, [formState.email, formState.password, formState.isSubmitting, errors]);
 
-  // Handle form submission
+  // Submit
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!validateForm()) {
-      return;
-    }
+    if (!validateForm()) return;
 
-    setFormState(prev => ({ ...prev, isSubmitting: true, successMessage: null }));
+    setFormState((prev) => ({ ...prev, isSubmitting: true, successMessage: null }));
     setErrors({});
 
     try {
-      // Set persistence based on remember me choice
       await setPersistence(
-        auth, 
+        auth,
         formState.rememberMe ? browserLocalPersistence : browserSessionPersistence
       );
 
-      // Sign in user
       await signInWithEmailAndPassword(
-        auth, 
-        formState.email.trim(), 
+        auth,
+        formState.email.trim(),
         formState.password
       );
-      
-      // onAuthStateChanged will handle redirect
+      // Redirect handled by onAuthStateChanged
     } catch (error: unknown) {
       const authError = error as AuthError;
       let errorMessage = 'Failed to sign in. Please try again.';
-
       switch (authError.code) {
         case 'auth/user-not-found':
           errorMessage = 'No account found with this email address.';
@@ -157,58 +150,55 @@ export default function LoginPage() {
           errorMessage = 'Invalid email or password.';
           break;
         case 'auth/too-many-requests':
-          errorMessage = 'Too many failed attempts. Please try again later or reset your password.';
+          errorMessage =
+            'Too many failed attempts. Please try again later or reset your password.';
           break;
         case 'auth/user-disabled':
           errorMessage = 'This account has been disabled. Please contact support.';
           break;
         case 'auth/network-request-failed':
-          errorMessage = 'Network error. Please check your connection and try again.';
+          errorMessage =
+            'Network error. Please check your connection and try again.';
           break;
         default:
           errorMessage = authError.message || 'An unexpected error occurred.';
       }
-
       setErrors({ general: errorMessage });
     } finally {
-      setFormState(prev => ({ ...prev, isSubmitting: false }));
+      setFormState((prev) => ({ ...prev, isSubmitting: false }));
     }
   };
 
-  // Handle password reset
+  // Reset password
   const handleForgotPassword = async () => {
     const email = formState.email.trim();
-    
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
       setErrors({ general: 'Please enter your email address first.' });
       return;
     }
-
-    setFormState(prev => ({ ...prev, isSubmitting: true }));
+    setFormState((prev) => ({ ...prev, isSubmitting: true }));
     setErrors({});
-
     try {
       await sendPasswordResetEmail(auth, email);
-      setFormState(prev => ({ 
-        ...prev, 
-        successMessage: `Password reset link sent to ${email}. Check your inbox.` 
+      setFormState((prev) => ({
+        ...prev,
+        successMessage: `Password reset link sent to ${email}. Check your inbox.`,
       }));
     } catch (error: unknown) {
       const authError = error as AuthError;
-      setErrors({ 
-        general: authError.code === 'auth/user-not-found' 
-          ? 'No account found with this email address.'
-          : 'Failed to send reset email. Please try again.'
+      setErrors({
+        general:
+          authError.code === 'auth/user-not-found'
+            ? 'No account found with this email address.'
+            : 'Failed to send reset email. Please try again.',
       });
     } finally {
-      setFormState(prev => ({ ...prev, isSubmitting: false }));
+      setFormState((prev) => ({ ...prev, isSubmitting: false }));
     }
   };
 
-  // Update form state helper
-  const updateFormState = (updates: Partial<FormState>) => {
-    setFormState(prev => ({ ...prev, ...updates }));
-  };
+  const updateFormState = (updates: Partial<FormState>) =>
+    setFormState((prev) => ({ ...prev, ...updates }));
 
   if (!mounted) {
     return (
@@ -241,7 +231,7 @@ export default function LoginPage() {
           onSubmit={handleSubmit}
           className="space-y-6 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm p-8 shadow-xl"
         >
-          {/* Email Field */}
+          {/* Email */}
           <div>
             <label htmlFor="email" className="block text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
               Email Address
@@ -272,7 +262,7 @@ export default function LoginPage() {
             )}
           </div>
 
-          {/* Password Field */}
+          {/* Password */}
           <div>
             <label htmlFor="password" className="block text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">
               Password
@@ -285,7 +275,7 @@ export default function LoginPage() {
                 value={formState.password}
                 onChange={(e) => updateFormState({ password: e.target.value })}
                 placeholder="Enter your password"
-                className={`pl-10 pr-10 py-3 w-full rounded-xl border bg-white/60 dark:bg-gray-900/60 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 transition-all ${
+                className={`pl-10 pr-10 py-3 w-full rounded-1xl border bg-white/60 dark:bg-gray-900/60 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 transition-all ${
                   errors.password 
                     ? 'border-rose-300 dark:border-rose-700 focus:ring-rose-500' 
                     : 'border-gray-300 dark:border-gray-600 focus:ring-blue-500 focus:border-blue-500'
@@ -301,10 +291,11 @@ export default function LoginPage() {
                 disabled={formState.isSubmitting}
                 aria-label={formState.showPassword ? 'Hide password' : 'Show password'}
               >
-                {formState.showPassword ? 
-                  <EyeOff className="h-4 w-4 text-gray-500" /> : 
+                {formState.showPassword ? (
+                  <EyeOff className="h-4 w-4 text-gray-500" />
+                ) : (
                   <Eye className="h-4 w-4 text-gray-500" />
-                }
+                )}
               </button>
             </div>
             {errors.password && (
@@ -326,11 +317,13 @@ export default function LoginPage() {
                   className="sr-only"
                   disabled={formState.isSubmitting}
                 />
-                <div className={`w-5 h-5 rounded border-2 transition-all ${
-                  formState.rememberMe 
-                    ? 'bg-blue-600 border-blue-600' 
-                    : 'bg-white border-gray-300 dark:bg-gray-800 dark:border-gray-600'
-                }`}>
+                <div
+                  className={`w-5 h-5 rounded border-2 transition-all ${
+                    formState.rememberMe
+                      ? 'bg-blue-600 border-blue-600'
+                      : 'bg-white border-gray-300 dark:bg-gray-800 dark:border-gray-600'
+                  }`}
+                >
                   {formState.rememberMe && (
                     <CheckCircle2 className="h-4 w-4 text-white absolute top-0.5 left-0.5" />
                   )}
@@ -351,7 +344,7 @@ export default function LoginPage() {
             </button>
           </div>
 
-          {/* Error Message */}
+          {/* Error */}
           {errors.general && (
             <div className="rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-900/20 p-4">
               <p className="text-sm text-rose-700 dark:text-rose-300 flex items-center gap-2">
@@ -361,7 +354,7 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Success Message */}
+          {/* Success */}
           {formState.successMessage && (
             <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-900/20 p-4">
               <p className="text-sm text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
@@ -371,7 +364,7 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Submit Button */}
+          {/* Submit */}
           <button
             type="submit"
             disabled={!canSubmit}
@@ -391,7 +384,7 @@ export default function LoginPage() {
         {/* Footer */}
         <div className="mt-8 text-center">
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Don't have a drug shop account?{' '}
+            Don't have a drug shop account{' '}
             <Link
               href="/user-manager/new"
               className="font-semibold text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 transition-colors inline-flex items-center gap-1"
@@ -403,5 +396,18 @@ export default function LoginPage() {
         </div>
       </div>
     </main>
+  );
+}
+
+// ---- Page wrapper: provides Suspense boundary for useSearchParams ----
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      </div>
+    }>
+      <LoginPageInner />
+    </Suspense>
   );
 }
