@@ -193,7 +193,7 @@ export default function InspectionsPage() {
         </div>
 
         {/* Filters */}
-        <div className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="mb-4 grid">
           <div className="col-span-2">
             <input
               value={search}
@@ -201,20 +201,6 @@ export default function InspectionsPage() {
               placeholder="Search by Serial, Drugshop, or Created By…"
               className="block w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white/60 dark:bg-gray-900/60 px-4 py-2.5 text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
             />
-          </div>
-
-          <div>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as any)}
-              className="block w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white/60 dark:bg-gray-900/60 px-4 py-2.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
-            >
-              <option value="all">All statuses</option>
-              <option value="draft">Draft</option>
-              <option value="submitted">Submitted</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-            </select>
           </div>
         </div>
 

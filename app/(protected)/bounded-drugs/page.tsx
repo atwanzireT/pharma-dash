@@ -11,6 +11,7 @@ import {
   orderByChild,
   startAt,
   update,
+  push,           // ✅ for release records
 } from 'firebase/database';
 import primaryApp, { database as primaryDb } from '@/firebase';
 import { getAuth } from 'firebase/auth';
@@ -24,13 +25,16 @@ import {
   Lock,
   AlertTriangle,
   User as UserIcon,
+  Calendar,
+  Phone,
+  MessageSquare,
 } from 'lucide-react';
-import Navbar from '@/components/Navbar';
 
 type Inspection = {
   id: string;
   serialNumber?: string;
   drugshopName?: string;
+  clientTelephone?: string;
   location?: any;
   boxesImpounded?: string | number;
   reason?: string;
@@ -44,7 +48,7 @@ type Inspection = {
 };
 
 function parseNumber(n: any): number {
-  if (typeof n === 'number') return n;
+  if (typeof n === 'number') return Number.isFinite(n) ? n : 0;
   if (typeof n === 'string') {
     const x = Number(n);
     return Number.isFinite(x) ? x : 0;
@@ -65,6 +69,10 @@ function formatDate(isoOrMs?: string | number) {
   }).format(d);
 }
 
+const YOOLA_API_KEY = 'xgpYr222zWMD4w5VIzUaZc5KYO5L1w8N38qBj1qPflwguq9PdJ545NTCSLTS7H00';
+
+const validateTel = (t: string) => /^(\+?\d{7,15})$/.test((t || '').replace(/\s+/g, ''));
+
 export default function BoundedFromInspections() {
   const db = primaryDb ?? getDatabase(primaryApp);
   const auth = getAuth(primaryApp);
@@ -73,16 +81,23 @@ export default function BoundedFromInspections() {
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<Inspection[]>([]);
   const [search, setSearch] = useState('');
-  const [savingId, setSavingId] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Modal state
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [targetRow, setTargetRow] = useState<Inspection | null>(null);
+
+  // Release form fields (modal)
+  const [relDate, setRelDate] = useState<string>(() => new Date().toISOString().slice(0, 10)); // yyyy-mm-dd
+  const [clientName, setClientName] = useState('');
+  const [telephone, setTelephone] = useState('');
+  const [releasedBy, setReleasedBy] = useState('');
+  const [comment, setComment] = useState('');
+  const [boxesReleased, setBoxesReleased] = useState('');
   const [ack1, setAck1] = useState(false);
   const [ack2, setAck2] = useState(false);
   const [confirmText, setConfirmText] = useState('');
-  const [releaseNote, setReleaseNote] = useState('');
 
   // focus management
   const firstFocusableRef = useRef<HTMLInputElement | null>(null);
@@ -150,47 +165,118 @@ export default function BoundedFromInspections() {
 
   function openReleaseModal(row: Inspection) {
     setTargetRow(row);
+    setSaveError(null);
+
+    // seed form
+    setRelDate(new Date().toISOString().slice(0, 10));
+    setClientName('');
+    setTelephone(row.clientTelephone || '');
+    setReleasedBy(me?.displayName || me?.email || '');
+    setComment('');
+    setBoxesReleased('');
     setAck1(false);
     setAck2(false);
     setConfirmText('');
-    setReleaseNote('');
-    setSaveError(null);
+
     setConfirmOpen(true);
   }
 
-  function canConfirm(): boolean {
+  const canConfirm = useMemo(() => {
     if (!targetRow) return false;
-    const serial = (targetRow.serialNumber || '').trim();
     const typed = confirmText.trim();
-    const okTyped =
-      typed.toUpperCase() === 'RELEASE' ||
-      (!!serial && typed.toLowerCase() === serial.toLowerCase());
+    const serial = (targetRow.serialNumber || '').trim();
+    const okTyped = typed.toUpperCase() === 'RELEASE' || (!!serial && typed.toLowerCase() === serial.toLowerCase());
     return ack1 && ack2 && okTyped;
+  }, [ack1, ack2, confirmText, targetRow?.serialNumber]);
+
+  async function sendSms(phone: string, message: string) {
+    // ⚠️ For production, call your own /api/send-sms route instead of hitting the provider directly.
+    // return fetch('/api/send-sms', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ phone, message }) });
+    return fetch('https://yoolasms.com/api/v1/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone, message, api_key: YOOLA_API_KEY }),
+    });
   }
 
-  async function performRelease(row: Inspection) {
-    if (!canConfirm()) return;
-    setSaveError(null);
-    try {
-      setSavingId(row.id);
+  async function handleSubmitRelease() {
+    if (!targetRow) return;
+    const available = parseNumber(targetRow.boxesImpounded);
+    const count = parseInt(boxesReleased, 10);
 
-      // payload keeps type for boxesImpounded and adds audit fields
-      const payload: Record<string, any> = {
-        boxesImpounded: typeof row.boxesImpounded === 'string' ? '0' : 0,
+    if (!relDate) return setSaveError('Release date is required.');
+    if (!clientName.trim()) return setSaveError('Client name is required.');
+    if (!telephone.trim()) return setSaveError('Telephone number is required.');
+    if (!validateTel(telephone)) return setSaveError('Enter a valid phone number (e.g. +2567XXXXXXX).');
+    if (!releasedBy.trim()) return setSaveError('Released by is required.');
+    if (Number.isNaN(count) || count <= 0) return setSaveError('Enter a valid number of boxes to release.');
+    if (count > available) return setSaveError(`You are releasing ${count}, but only ${available} are impounded.`);
+    if (!canConfirm) return setSaveError('Complete acknowledgements and type RELEASE or the Serial.');
+
+    try {
+      setSaveError(null);
+      setSavingId(targetRow.id);
+
+      // 1) Write release record
+      const releaseRef = ref(db, `releases/${targetRow.id}`);
+      const nowIso = new Date().toISOString();
+      await push(releaseRef, {
+        inspectionId: targetRow.id,
+        date: new Date(relDate).toISOString(),
+        clientName: clientName.trim(),
+        telephone: telephone.replace(/\s+/g, ''),
+        releasedBy: releasedBy.trim(),
+        comment: comment.trim(),
+        boxesReleased: count,
+        createdAt: nowIso,
+        createdByUid: me?.uid ?? 'anonymous',
+        createdByEmail: me?.email ?? null,
+        createdByName: me?.displayName ?? null,
+      });
+
+      // 2) Update inspection (remaining boxes + status + stamps)
+      const remaining = Math.max(0, available - count);
+      const isStringType = typeof targetRow.boxesImpounded === 'string';
+      const nextStatus = remaining === 0 ? 'Completed' : 'Pending Review';
+
+      await update(ref(db, `inspections/${targetRow.id}`), {
+        boxesImpounded: isStringType ? String(remaining) : remaining,
+        status: nextStatus,
         releasedAt: Date.now(),
         releasedBy: me?.uid ?? 'anonymous',
-      };
-      if (me?.email) payload.releasedByEmail = me.email;
-      if (me?.displayName) payload.releasedByName = me.displayName;
-      if (releaseNote.trim()) payload.releaseNote = releaseNote.trim();
+        releasedByEmail: me?.email ?? null,
+        releasedByName: me?.displayName ?? null,
+        lastReleaseNote: comment.trim() || null,
+        lastReleaseCount: count,
+      });
 
-      await update(ref(db, `inspections/${row.id}`), payload);
+      // 3) Send SMS
+      const when = new Date(relDate);
+      const whenStr = isNaN(when.getTime())
+        ? relDate
+        : when.toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
+      const msg =
+        `Dear ${targetRow.drugshopName || 'Drugshop'}, ` +
+        `${count} box(es) have been released on ${whenStr}. ` +
+        `Serial: ${targetRow.serialNumber || '—'}. ` +
+        `Remaining: ${remaining}. ` +
+        `Officer: ${releasedBy.trim()}.`;
+
+      let smsOk = true;
+      try {
+        const smsRes = await sendSms(telephone.replace(/\s+/g, ''), msg);
+        if (!smsRes.ok) smsOk = false;
+      } catch {
+        smsOk = false;
+      }
+
+      // Done
       setConfirmOpen(false);
+      alert(`Release recorded${smsOk ? ' and SMS sent' : ' (SMS failed)'}.\nStatus: ${nextStatus}`);
     } catch (e: any) {
-      setSaveError(
-        e?.message || 'Failed to mark as released. Check permissions or network and try again.'
-      );
+      console.error(e);
+      setSaveError(e?.message || 'Failed to submit release. Please try again.');
     } finally {
       setSavingId(null);
     }
@@ -274,6 +360,8 @@ export default function BoundedFromInspections() {
                         '—'
                       );
 
+                    const isCompleted = (r.status || '').toLowerCase().includes('complete') || boxes === 0;
+
                     return (
                       <tr key={r.id} className="hover:bg-gray-50/60 dark:hover:bg-gray-800/40">
                         <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">{r.serialNumber || '—'}</td>
@@ -299,17 +387,16 @@ export default function BoundedFromInspections() {
                               <ShieldCheck className="h-4 w-4" />
                               Inspection
                             </Link>
-                            {boxes > 0 ? (
-                              <button
-                                onClick={() => openReleaseModal(r)}
-                                className="inline-flex items-center gap-1 rounded-xl bg-green-600 hover:bg-green-700 text-white px-3 py-2 disabled:opacity-60"
-                                title="Mark as released"
-                                disabled={savingId === r.id}
-                              >
-                                <Lock className="h-4 w-4" />
-                                Release
-                              </button>
-                            ) : null}
+
+                            <button
+                              onClick={() => openReleaseModal(r)}
+                              className="inline-flex items-center gap-1 rounded-xl bg-green-600 hover:bg-green-700 text-white px-3 py-2 disabled:opacity-60"
+                              title="Open release form"
+                              disabled={savingId === r.id || isCompleted}
+                            >
+                              <Lock className="h-4 w-4" />
+                              Release
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -332,7 +419,7 @@ export default function BoundedFromInspections() {
           <Package className="h-4 w-4" /> Data source: <code className="px-1">/inspections</code> (filtered where <code className="px-1">boxesImpounded &gt; 0</code>).
         </p>
 
-        {/* Confirmation Modal */}
+        {/* Release Form Modal */}
         {confirmOpen && targetRow && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             {/* Backdrop */}
@@ -342,7 +429,7 @@ export default function BoundedFromInspections() {
             />
             {/* Dialog */}
             <div
-              className="relative z-10 w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-5"
+              className="relative z-10 w-full max-w-2xl rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-xl p-5"
               role="dialog"
               aria-modal="true"
               aria-labelledby="release-title"
@@ -358,7 +445,7 @@ export default function BoundedFromInspections() {
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <AlertTriangle className="h-5 w-5 text-amber-500" />
-                  <h2 id="release-title" className="text-lg font-semibold">Confirm Release</h2>
+                  <h2 id="release-title" className="text-lg font-semibold">Release Form</h2>
                 </div>
                 <button
                   className="rounded-full p-1 hover:bg-gray-100 dark:hover:bg-gray-800"
@@ -370,32 +457,101 @@ export default function BoundedFromInspections() {
               </div>
 
               {/* Summary */}
-              <p id="release-desc" className="sr-only">
-                Confirm you want to release the impounded items and record a release note.
-              </p>
-              <div className="mt-3 text-sm space-y-1">
+              <div className="mt-3 text-sm grid grid-cols-1 md:grid-cols-2 gap-2">
                 <p><span className="text-gray-500">Serial:</span> <span className="font-medium">{targetRow.serialNumber || '—'}</span></p>
                 <p><span className="text-gray-500">Drugshop:</span> <span className="font-medium">{targetRow.drugshopName || '—'}</span></p>
-                <p><span className="text-gray-500">Impounded Boxes:</span> <span className="font-medium">{parseNumber(targetRow.boxesImpounded)}</span></p>
+                <p><span className="text-gray-500">Impounded:</span> <span className="font-medium">{parseNumber(targetRow.boxesImpounded)} box(es)</span></p>
                 <p className="flex items-center gap-2 text-gray-600 dark:text-gray-400">
                   <UserIcon className="h-4 w-4" />
-                  Will be recorded as: <span className="font-medium text-gray-800 dark:text-gray-200 ml-1">
+                  Officer: <span className="font-medium text-gray-800 dark:text-gray-200 ml-1">
                     {me?.displayName || me?.email || me?.uid || 'anonymous'}
                   </span>
                 </p>
               </div>
 
-              {/* Acknowledgements */}
-              <div className="mt-4 space-y-3">
-                <label className="flex items-start gap-3 text-sm">
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                {/* Date */}
+                <div>
+                  <label className="text-sm font-medium flex items-center gap-2"><Calendar className="h-4 w-4" /> Date *</label>
                   <input
                     ref={firstFocusableRef}
+                    type="date"
+                    value={relDate}
+                    onChange={(e) => setRelDate(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
+                  />
+                </div>
+
+                {/* Client name */}
+                <div>
+                  <label className="text-sm font-medium">Client Name *</label>
+                  <input
+                    value={clientName}
+                    onChange={(e) => setClientName(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
+                    placeholder="Facility representative"
+                  />
+                </div>
+
+                {/* Telephone */}
+                <div>
+                  <label className="text-sm font-medium flex items-center gap-2"><Phone className="h-4 w-4" /> Telephone *</label>
+                  <input
+                    value={telephone}
+                    onChange={(e) => setTelephone(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
+                    placeholder="+2567XXXXXXXX"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">We’ll notify this number via SMS after release.</p>
+                </div>
+
+                {/* Released by */}
+                <div>
+                  <label className="text-sm font-medium">Released By *</label>
+                  <input
+                    value={releasedBy}
+                    onChange={(e) => setReleasedBy(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
+                    placeholder="Officer name"
+                  />
+                </div>
+
+                {/* Boxes Released */}
+                <div>
+                  <label className="text-sm font-medium flex items-center gap-2"><Package className="h-4 w-4" /> Boxes Released *</label>
+                  <input
+                    value={boxesReleased}
+                    onChange={(e) => setBoxesReleased(e.target.value.replace(/[^\d]/g, ''))}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
+                    placeholder="e.g. 2"
+                    inputMode="numeric"
+                  />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Available: {parseNumber(targetRow.boxesImpounded)} box(es)</p>
+                </div>
+
+                {/* Comment */}
+                <div className="md:col-span-2">
+                  <label className="text-sm font-medium flex items-center gap-2"><MessageSquare className="h-4 w-4" /> Comment</label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={4}
+                    className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
+                    placeholder="Receipt number, notes…"
+                  />
+                </div>
+              </div>
+
+              {/* Acknowledgements */}
+              <div className="mt-4 space-y-2">
+                <label className="flex items-start gap-3 text-sm">
+                  <input
                     type="checkbox"
                     checked={ack1}
                     onChange={(e) => setAck1(e.target.checked)}
                     className="mt-1 h-4 w-4"
                   />
-                  <span>I have verified and counted the items physically with the responsible facility representative.</span>
+                  <span>I have verified and counted the items with the facility representative.</span>
                 </label>
                 <label className="flex items-start gap-3 text-sm">
                   <input
@@ -404,34 +560,21 @@ export default function BoundedFromInspections() {
                     onChange={(e) => setAck2(e.target.checked)}
                     className="mt-1 h-4 w-4"
                   />
-                  <span>I accept responsibility for this action and confirm that a receipt/handover record will be kept.</span>
+                  <span>I accept responsibility and a handover record will be kept.</span>
                 </label>
               </div>
 
               {/* Type-to-confirm */}
-              <div className="mt-4">
+              <div className="mt-3">
                 <label className="text-sm font-medium">
                   Type <code>RELEASE</code> or the Serial (<code>{targetRow.serialNumber || '—'}</code>) to confirm
                 </label>
                 <input
                   value={confirmText}
                   onChange={(e) => setConfirmText(e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
+                  className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm"
                   placeholder="RELEASE or SN00123"
                   autoCapitalize="characters"
-                  inputMode="text"
-                />
-              </div>
-
-              {/* Optional note */}
-              <div className="mt-3">
-                <label className="text-sm font-medium">Release note (optional)</label>
-                <textarea
-                  value={releaseNote}
-                  onChange={(e) => setReleaseNote(e.target.value)}
-                  rows={3}
-                  className="mt-1 w-full rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-950 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 dark:focus:ring-indigo-400"
-                  placeholder="Name of receiver, receipt number, comments…"
                 />
               </div>
 
@@ -452,23 +595,23 @@ export default function BoundedFromInspections() {
                   Cancel
                 </button>
                 <button
-                  onClick={() => targetRow && performRelease(targetRow)}
-                  disabled={!canConfirm() || savingId === targetRow.id}
+                  onClick={handleSubmitRelease}
+                  disabled={!canConfirm || savingId === targetRow.id}
                   className="inline-flex items-center gap-2 rounded-xl bg-green-600 hover:bg-green-700 text-white px-4 py-2 disabled:opacity-60"
-                  title="Confirm release"
+                  title="Submit release"
                 >
                   {savingId === targetRow.id ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : (
                     <Check className="h-4 w-4" />
                   )}
-                  Confirm Release
+                  Submit Release
                 </button>
               </div>
 
-              {!canConfirm() && (
+              {!canConfirm && (
                 <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                  Complete all confirmations and type the exact Serial or <strong>RELEASE</strong> to enable.
+                  Complete checks and type the exact Serial or <strong>RELEASE</strong> to enable.
                 </p>
               )}
             </div>
